@@ -1,61 +1,62 @@
 const express = require("express");
-const fs = require("fs");
+const { spawn } = require("child_process");
 const path = require("path");
 const ytdl = require("ytdl-core");
 const YtDlpWrap = require("yt-dlp-wrap").default;
+
 const ytDlpPath = path.join(__dirname, "bin", "yt-dlp.exe");
 const ytDlpWrap = new YtDlpWrap(ytDlpPath);
-
 const app = express();
 
-// app.get("/stream1", (req, res) => {
-//   const filePath = path.join(__dirname, "test.mp3");
-
-//   if (!fs.existsSync(filePath)) {
-//     return res.status(404).send("Datei nicht gefunden.");
-//   }
-
-//   res.setHeader("Content-Type", "audio/mpeg");
-//   const readStream = fs.createReadStream(filePath);
-//   readStream.pipe(res);
-// });
-
-// 2. Streaming einer lokalen Datei
 app.get("/youtube", (req, res) => {
-  const link = req.query.link || ""
+  const link = req.query.link;
 
-  // Check if the provided link is valid
   if (!link || (!ytdl.validateID(link) && !ytdl.validateURL(link))) {
     return res.status(400).send("Fehlender oder ungültiger YouTube-Link.");
   }
 
-  // Set the headers to send an audi stream and to buffer it in 20 second segments
   res.setHeader("Content-Type", "audio/mpeg");
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Accept-Ranges", "none");
 
-  const ytStream = ytDlpWrap.execStream([
+  // yt-dlp audio stream
+  const ytdlp = ytDlpWrap.execStream([
     link,
     "--quiet",
     "--no-playlist",
     "-f", "bestaudio",
-    "--limit-rate", "200K", // Optional: für langsameres Nachladen
     "-o", "-"
   ]);
 
-  ytStream.on("error", (err) => {
-    console.error("Fehler beim Stream:", err.message);
-    res.status(500).send("Streamfehler.");
+  // ffmpeg konvertiert zu MP3 on-the-fly
+  const ffmpeg = spawn("ffmpeg", [
+    "-i", "pipe:0",
+    "-vn",               // kein Video
+    "-acodec", "libmp3lame",
+    "-f", "mp3",
+    "-b:a", "192k",      // konstante Bitrate (kannst du anpassen)
+    "pipe:1"
+  ]);
+
+  ytdlp.pipe(ffmpeg.stdin);
+  ffmpeg.stdout.pipe(res);
+
+  ffmpeg.stderr.on("data", (data) => {
+    // Debug-Zeug falls was schiefläuft
+    console.error("ffmpeg stderr:", data.toString());
   });
 
-  ytStream.pipe(res);
-
   req.on("close", () => {
-    ytStream.destroy();
+    ytdlp.destroy();
+    ffmpeg.kill("SIGKILL");
+  });
+
+  ffmpeg.on("error", (err) => {
+    console.error("ffmpeg error:", err.message);
+    res.status(500).send("FFmpeg-Fehler.");
   });
 });
 
 app.listen(3000, () => {
   console.log("Server läuft unter http://localhost:3000");
 });
-
